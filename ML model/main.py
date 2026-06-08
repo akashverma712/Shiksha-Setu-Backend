@@ -37,32 +37,30 @@ app.add_middleware(
 client = MongoClient(MONGO_URI)
 db = client[DB_NAME]
 collection = db[COLLECTION_NAME]
-student_collection = db["students"] # Assuming collection name is 'students' based on 'Student' model
+student_collection = db["students"] 
 
-# --- Data Models for JSON Input ---
+
 
 class AttendanceItem(BaseModel):
     student: str # ObjectId as string
     date: Optional[str] = None
     status: str
-    # Add other fields if necessary, but we mainly need student and status/presence
 
 class MarksItem(BaseModel):
     rollNo: str
     semester: str
     cgpa: float
-    # date: Optional[str]
 
 class FeesItem(BaseModel):
     rollNo: str
     amount: float
     status: str
     scholarshipName: Optional[str] = None
-    payment_status: Optional[str] = None # Alias for status if needed?
-    outstanding_months: Optional[int] = None # If passed directly?
+    payment_status: Optional[str] = None 
+    outstanding_months: Optional[int] = None 
 
 class PredictionPayload(BaseModel):
-    attendance: List[Dict[str, Any]] # Using Dict to be flexible with extra fields
+    attendance: List[Dict[str, Any]] 
     marks: List[Dict[str, Any]]
     fees: List[Dict[str, Any]]
 
@@ -100,27 +98,20 @@ def get_student_map():
 @app.post("/predict")
 async def predict_json(payload: PredictionPayload):
     try:
-        # 1. Fetch Student Mapping (ObjectId -> RollNo)
         student_map = get_student_map()
         
-        # 2. Process Attendance
-        # We need to calculate attendance percentage per student (rollNo)
-        # Input: List of daily/subject attendance records
-        # Output: DataFrame with student_id, attendance (percentage)
+  
         
         att_data = []
         if payload.attendance:
-             # Group by student ID first
-            att_counts = {} # { student_id: { total: 0, present: 0 } }
+            att_counts = {} 
             
             for item in payload.attendance:
-                # 'student' in item is ObjectId
                 s_oid = item.get("student")
                 if not s_oid: continue
                 
-                # Map to RollNo
                 roll_no = student_map.get(s_oid)
-                if not roll_no: continue # specific log?
+                if not roll_no: continue
 
                 if roll_no not in att_counts:
                     att_counts[roll_no] = {"total": 0, "present": 0}
@@ -130,29 +121,22 @@ async def predict_json(payload: PredictionPayload):
                 if status == "present":
                     att_counts[roll_no]["present"] += 1
 
-            # Convert to list for DataFrame
             for roll_no, counts in att_counts.items():
                 pct = (counts["present"] / counts["total"] * 100) if counts["total"] > 0 else 0
                 att_data.append({"student_id": roll_no, "attendance": pct})
         
         df_att = pd.DataFrame(att_data)
         if df_att.empty:
-            # Fallback if no attendance data, create empty with column
             df_att = pd.DataFrame(columns=["student_id", "attendance"])
 
 
-        # 3. Process Marks
-        # Input: List of marks records
-        # Output: DataFrame with student_id, cgpa_semX or just avg_cgpa
         marks_data = []
         if payload.marks:
             for item in payload.marks:
                 roll_no = item.get("rollNo")
                 if not roll_no: continue
                 
-                # We need to reshape this potentially? 
-                # The existing logic expects wide format or computes avg.
-                # Let's just create a row per record and let pandas pivot or group
+            
                 marks_data.append({
                     "student_id": roll_no,
                     "semester": item.get("semester"), # e.g. "1"
@@ -161,28 +145,18 @@ async def predict_json(payload: PredictionPayload):
         
         df_marks_raw = pd.DataFrame(marks_data)
         
-        # Pivot or Agg to get one row per student
+      
         if not df_marks_raw.empty:
-            # Simple average if multiple sems
             df_cgpa = df_marks_raw.groupby("student_id")["cgpa"].mean().reset_index()
             df_cgpa.rename(columns={"cgpa": "avg_cgpa"}, inplace=True)
         else:
             df_cgpa = pd.DataFrame(columns=["student_id", "avg_cgpa"])
 
-
-        # 4. Process Fees
-        # Input: List of fee records
-        # Output: DataFrame with student_id, outstanding_months (calculated?)
         fees_data = []
         if payload.fees:
-            # Logic: If status is 'pending', it counts as unpaid?
-            # Or we look for 'outstanding_months' if it was passed (it's not in the mongoose model explicitly)
-            # The mongoose model has 'amount' and 'status'.
-            # Let's assume strict rule: Count number of 'pending' records per student? 
-            # OR sum the amount? The ML `compute_fee_weight` uses `months_unpaid`.
-            # Let's count pending records as months unpaid for now.
+
             
-            fee_counts = {} # { rollNo: pending_count }
+            fee_counts = {} 
             
             for item in payload.fees:
                 roll_no = item.get("rollNo")
@@ -202,8 +176,7 @@ async def predict_json(payload: PredictionPayload):
             df_fees = pd.DataFrame(columns=["student_id", "outstanding_months"])
 
 
-        # 5. Merge DataFrames
-        # Base is all unique students found in any dataset
+     
         all_students = set(df_att["student_id"].unique()) | \
                        set(df_cgpa["student_id"].unique()) | \
                        set(df_fees["student_id"].unique())
@@ -226,12 +199,10 @@ async def predict_json(payload: PredictionPayload):
         else:
              df["outstanding_months"] = 0
 
-        # 6. Feature Engineering
         if "fee_weight" not in df.columns:
             df["fee_weight"] = df["outstanding_months"].apply(compute_fee_weight)
             
-        # Verify columns required for rule score
-        # compute_rule_columns needs: attendance, avg_cgpa, fee_weight
+  
         df = compute_rule_columns(df)
 
         ml_features = ["attendance", "avg_cgpa", "fee_weight", "rule_score"]
@@ -239,21 +210,14 @@ async def predict_json(payload: PredictionPayload):
             if col not in df.columns:
                 df[col] = 0.0
 
-        # 7. Predict
         df["ml_pred"] = ml_model.predict_proba(df[ml_features].fillna(0))[:, 1]
 
-        # 8. Final Score
         df["final_score"] = ((df["ml_pred"] + df["rule_score"]) / 2) * 100
-        # df["risk_zone"] = df["final_score"].apply(get_zone)
-
-        # 9. Format Response
-        # Expected response: { predictions: { "ROLL123": 85.5, ... } }
+    
         predictions = {}
         for _, row in df.iterrows():
             predictions[row["student_id"]] = row["final_score"]
         
-        # Optional: Save to DB like before if needed, but the Controller updates Student models directly now.
-        # We can still save to predictions collection for history.
         records = df.to_dict(orient="records")
         if records:
             collection.insert_many(records)
@@ -269,7 +233,6 @@ async def predict_json(payload: PredictionPayload):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Keep the Batch endpoint for backward compatibility or file uploads if needed
 @app.post("/predict/batch")
 async def batch_predict(
     attendance_csv: UploadFile = File(...),
