@@ -625,6 +625,4 @@ Please fix any listed Known Issues before adding new features.
 
 ---
 
-## License
 
-ISC © Shiksha-Setu Contributors
